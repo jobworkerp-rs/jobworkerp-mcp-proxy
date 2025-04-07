@@ -1,0 +1,30 @@
+[package]
+name = "all-in-one"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "stdio-server"
+path = "src/stdio.rs"
+
+[[bin]]
+name = "sse-server"
+path = "src/sse.rs"
+
+[[bin]]
+name = "test-client"
+path = "src/client.rs"
+
+[dependencies]
+proxy-server = { path = "../proxy-server" }
+jobworkerp-main = { git = "https://github.com/jobworkerp-rs/jobworkerp-rs.git", rev = "ee8e4eebff247926716d5110e1ca015297481888" }
+
+anyhow = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+dotenv = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { version = "0.7", features = ["io", "codec"] }
+rmcp = { workspace = true, features = ["client", "transport-sse"] }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }

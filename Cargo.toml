@@ -1,0 +1,37 @@
+[workspace]
+
+members = ["modules/jobworkerp-client", "proxy-server", "all-in-one"]
+
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["sutr"]
+description = "mcp for jobworkerp"
+repository = "https://github.com/jobworkerp-rs/mcp-jobworkerp"
+keywords = ["job-worker", "mcp"]
+categories = ["web-programming"]
+license = "Apache 2.0"
+
+[workspace.dependencies]
+anyhow = "1"
+dotenv = { version = "0.15" }
+futures = "0.3"
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "72e7533e413f66e8a24a1f9209c3dc60d2a5e178" }
+rand = { version = "0.8" }
+serde = { version = "1" }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3" }
+tracing-appender = "0.2"
+
+[profile.release]
+# Tell `rustc` to optimize for small code size.
+opt-level = "s"
+panic = "unwind"
+
+[profile.dev]
+panic = "unwind"

@@ -1,0 +1,34 @@
+[package]
+version.workspace = true
+edition.workspace = true
+name = "proxy-server"
+
+[[bin]]
+name = "stdio-proxy-server"
+path = "src/bin/stdio.rs"
+
+[[bin]]
+name = "sse-proxy-server"
+path = "src/bin/sse.rs"
+
+[dependencies]
+jobworkerp-client = { path = "../modules/jobworkerp-client" }
+
+anyhow = { workspace = true }
+axum = { version = "0.8", features = ["macros"] }
+dotenv = { workspace = true }
+futures = { workspace = true }
+rand = { workspace = true }
+rmcp = { workspace = true, features = [
+    "server",
+    "transport-sse-server",
+    "transport-io",
+] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true, features = ["full", "io-util"] }
+tokio-util = { version = "0.7", features = ["io", "codec"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tracing-appender = { workspace = true }
