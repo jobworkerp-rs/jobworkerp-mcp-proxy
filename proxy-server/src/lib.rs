@@ -1,5 +1,6 @@
 use crate::jobworkerp::JobworkerpRouter;
 use anyhow::Result;
+use jobworkerp::JobworkerpRouterConfig;
 use rmcp::{
     transport::{sse_server::SseServerConfig, stdio, SseServer},
     ServiceExt,
@@ -9,16 +10,8 @@ use tokio_util::sync::CancellationToken;
 mod common;
 pub mod jobworkerp;
 
-pub async fn boot_stdio_server() -> Result<()> {
-    let jobworkerp_address =
-        std::env::var("JOBWORKERP_ADDR").unwrap_or_else(|_| "http://127.0.0.1:9000".to_string());
-    let request_timeout_sec = std::env::var("REQUEST_TIMEOUT_SEC")
-        .ok()
-        .and_then(|s| s.parse::<u32>().ok());
-
-    tracing::info!("Starting MCP server");
-    let job_service =
-        JobworkerpRouter::new(jobworkerp_address.as_str(), request_timeout_sec).await?;
+pub async fn boot_stdio_server(config: JobworkerpRouterConfig) -> Result<()> {
+    let job_service = JobworkerpRouter::new(config).await?;
 
     // Create an instance of our counter router
     let service = job_service.serve(stdio()).await.inspect_err(|e| {
@@ -39,7 +32,36 @@ pub async fn boot_sse_server() -> Result<()> {
     let request_timeout_sec = std::env::var("REQUEST_TIMEOUT_SEC")
         .ok()
         .and_then(|s| s.parse::<u32>().ok());
-    let config = SseServerConfig {
+    let exclude_runner_as_tool = std::env::var("EXCLUDE_RUNNER_AS_TOOL")
+        .ok()
+        .and_then(|s| s.parse::<bool>().ok())
+        .unwrap_or_default();
+    let exclude_worker_as_tool = std::env::var("EXCLUDE_WORKER_AS_TOOL")
+        .ok()
+        .and_then(|s| s.parse::<bool>().ok())
+        .unwrap_or_default();
+
+    tracing::info!(
+        "Starting MCP server {} {}",
+        if exclude_runner_as_tool {
+            "without runner"
+        } else {
+            "with runner"
+        },
+        if exclude_worker_as_tool {
+            "without worker as tool"
+        } else {
+            "with worker as tool"
+        }
+    );
+    let config = JobworkerpRouterConfig {
+        jobworkerp_address,
+        request_timeout_sec,
+        exclude_runner_as_tool,
+        exclude_worker_as_tool,
+    };
+
+    let sse_config = SseServerConfig {
         sse_keep_alive: None,
         bind: mcp_address.parse()?,
         sse_path: "/sse".to_string(),
@@ -47,9 +69,9 @@ pub async fn boot_sse_server() -> Result<()> {
         ct: CancellationToken::new(),
     };
 
-    let mut sse_server = SseServer::serve_with_config(config).await?;
+    let mut sse_server = SseServer::serve_with_config(sse_config).await?;
     let ct = sse_server.config.ct.child_token();
-    let service = JobworkerpRouter::new(jobworkerp_address.as_str(), request_timeout_sec).await?;
+    let service = JobworkerpRouter::new(config).await?;
 
     // XXX workaround for sse_server
     loop {

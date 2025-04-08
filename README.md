@@ -143,4 +143,5 @@ Claude Desktop can be used as an MCP client with this proxy server. You can conf
 2. Engage with Claude AI as usual, utilizing job worker functionality through the All-in-One server
 
 **Note**: Please modify paths and URL settings appropriately for your environment.
+
 **Note**: When using stdio-server with Claude Desktop, processes may sometimes remain running.

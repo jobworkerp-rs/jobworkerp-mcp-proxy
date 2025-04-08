@@ -27,17 +27,30 @@ const CREATION_TOOL_DESCRIPTION: &str =
 - When this workflow is executed as a Tool, it will receive parameters matching this input schema
 - Specify execution steps that utilize any available runner(function) in the system (except this creation Tool)";
 
+pub struct JobworkerpRouterConfig {
+    pub jobworkerp_address: String,
+    pub request_timeout_sec: Option<u32>,
+    pub exclude_worker_as_tool: bool,
+    pub exclude_runner_as_tool: bool,
+}
+
 #[derive(Clone)]
 pub struct JobworkerpRouter {
     pub jobworkerp_client: Arc<JobworkerpClientWrapper>,
+    pub exclude_worker_as_tool: bool,
+    pub exclude_runner_as_tool: bool,
 }
 
 impl JobworkerpRouter {
     const WORKFLOW_CHANNEL: Option<&str> = Some("workflow");
-    pub async fn new(address: &str, request_timeout_sec: Option<u32>) -> Result<Self> {
-        let jobworkerp_client = JobworkerpClientWrapper::new(address, request_timeout_sec).await?;
+    pub async fn new(config: JobworkerpRouterConfig) -> Result<Self> {
+        let jobworkerp_client =
+            JobworkerpClientWrapper::new(&config.jobworkerp_address, config.request_timeout_sec)
+                .await?;
         Ok(Self {
             jobworkerp_client: Arc::new(jobworkerp_client),
+            exclude_worker_as_tool: config.exclude_worker_as_tool,
+            exclude_runner_as_tool: config.exclude_runner_as_tool,
         })
     }
     pub async fn create_workflow(
@@ -303,8 +316,72 @@ impl ServerHandler for JobworkerpRouter {
                     })
                 }
                 Ok(None) => {
-                    tracing::warn!("runner not found: {:?}", &request.name);
-                    Err(McpError::method_not_found::<CallToolRequestMethod>())
+                    tracing::info!("runner not found, run as worker: {:?}", &request.name);
+                    let request_args = request.arguments.unwrap_or_default();
+                    let (_wid, wdata) = self
+                        .jobworkerp_client
+                        .find_worker_by_name(&request.name)
+                        .await
+                        .map_err(|e| {
+                            tracing::error!("Failed to find worker: {}", e);
+                            McpError::method_not_found::<CallToolRequestMethod>()
+                        })?
+                        .ok_or_else(|| {
+                            tracing::info!("worker not found");
+                            McpError::method_not_found::<CallToolRequestMethod>()
+                        })?;
+                    let args = request_args
+                        .get("arguments")
+                        .cloned()
+                        .unwrap_or(Value::Null);
+
+                    // XXX negative runner_id is now used only for ReusableWorkflow
+                    let arguments = if wdata.runner_id.is_some_and(|id| id.value < 0) {
+                        tracing::info!("worker is reusable workflow");
+                        // // XXX over-wrapping arguments as object by llm...
+                        // let args = match args {
+                        //     Value::Object(arguments) => arguments
+                        //         .get("arguments")
+                        //         .cloned()
+                        //         .unwrap_or(Value::Object(arguments)),
+                        //     a => a,
+                        // };
+                        serde_json::json!({
+                            "input": args.to_string(),
+                        })
+                    } else {
+                        args
+                    };
+                    tracing::debug!("======= arguments: {:#?}", &arguments);
+                    let result = self
+                        .jobworkerp_client
+                        .enqueue_with_json(
+                            &wdata,
+                            arguments.clone(),
+                            TIMEOUT_SEC, // job timeout in seconds
+                        )
+                        .await
+                        .map_err(|e| match e.downcast_ref() {
+                            Some(error::ClientError::NotFound(m)) => {
+                                tracing::info!("Not found: {}", m);
+                                McpError::method_not_found::<CallToolRequestMethod>()
+                            }
+                            Some(e) => {
+                                tracing::error!("Failed to enqueue job: {}", e);
+                                McpError::internal_error(
+                                    format!("Failed to enqueue job: {}", e),
+                                    None,
+                                )
+                            }
+                            None => McpError::internal_error(
+                                format!("Failed to enqueue job: {}", e),
+                                None,
+                            ),
+                        })?;
+                    Ok(CallToolResult {
+                        content: vec![Content::json(result)?],
+                        is_error: None,
+                    })
                 }
                 Err(e) => {
                     tracing::error!("error: {:#?}", &e);
@@ -325,7 +402,7 @@ impl ServerHandler for JobworkerpRouter {
         async move {
             let functions = self
                 .jobworkerp_client
-                .find_function_list(false, false)
+                .find_function_list(self.exclude_runner_as_tool, self.exclude_worker_as_tool)
                 .await
                 .map_err(|e| {
                     McpError::internal_error(format!("Failed to find tools: {}", e), None)
