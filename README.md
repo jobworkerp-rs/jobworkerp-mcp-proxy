@@ -74,8 +74,8 @@ cargo run --bin stdio-proxy-server
 - `JOBWORKERP_ADDR`: URL of the jobworkerp server to proxy to (default: `http://127.0.0.1:9000`)
 - `REQUEST_TIMEOUT_SEC`: Request timeout in seconds (default: `60`)
 - `RUST_LOG`: Log level configuration (recommended: `info,h2=warn`)
-- `EXCLUDE_RUNNER_AS_TOOL`: exclude jobworkerp runner
-- `EXCLUDE_WORKER_AS_TOOL`: exclude jobworkerp worker (may be true when you use to create workflow)
+- `EXCLUDE_RUNNER_AS_TOOL`: exclude jobworkerp runner (for reduce context)
+- `EXCLUDE_WORKER_AS_TOOL`: exclude jobworkerp worker (may be true when you use to create workflow for reduce context)
 
 ### Environment Configuration File
 
