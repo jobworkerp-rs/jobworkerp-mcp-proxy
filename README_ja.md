@@ -15,8 +15,8 @@ Jobworkerp MCPプロキシサーバーは、MCPクライアントからMCPツー
   - 非同期処理の結果をMCPクライアントに返却
 - ツール作成機能
   - ReusableWorkflowの作成：作成したワークフローをツールとして再利用可能
-  - Custom Workerの作成：特定の処理に特化したツールを実装可能
-  - LLMによる自動ツール作成：MCPクライアントとして使用されるLLMにより必要なツールを自動的に作成可能 (Tool: REUSABLE_WORKFLOW)
+  - Toolの作成：Worker作成により特定パラメータで実行するツールを簡単に作成
+  - LLMによる自動ツール作成：MCPクライアントとして使用されるLLMにより必要なツールを自動的に作成 (Tool: REUSABLE_WORKFLOW)
 
 ## 構成
 
