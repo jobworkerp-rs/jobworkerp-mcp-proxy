@@ -74,6 +74,8 @@ cargo run --bin stdio-proxy-server
 - `JOBWORKERP_ADDR`: URL of the jobworkerp server to proxy to (default: `http://127.0.0.1:9000`)
 - `REQUEST_TIMEOUT_SEC`: Request timeout in seconds (default: `60`)
 - `RUST_LOG`: Log level configuration (recommended: `info,h2=warn`)
+- `EXCLUDE_RUNNER_AS_TOOL`: exclude jobworkerp runner
+- `EXCLUDE_WORKER_AS_TOOL`: exclude jobworkerp worker (may be true when you use to create workflow)
 
 ### Environment Configuration File
 
@@ -96,12 +98,12 @@ REQUEST_TIMEOUT_SEC=60                   # Request timeout in seconds
 RUST_LOG=info,h2=warn                    # Log level settings
 
 # jobworkerp settings for All-in-One mode
-GRPC_ADDR=0.0.0.0:9010                   # gRPC server address
+GRPC_ADDR=0.0.0.0:9010                    # gRPC server address
 SQLITE_URL="sqlite:///path/to/db.sqlite3" # SQLite database path
-SQLITE_MAX_CONNECTIONS=20                # SQLite maximum connections
+SQLITE_MAX_CONNECTIONS=20                 # SQLite maximum connections
 
 # Distributed queue mode settings (if needed)
-REDIS_URL="redis://127.0.0.1:6379/0"     # Redis connection URL
+#REDIS_URL="redis://127.0.0.1:6379/0"     # Redis connection URL
 ```
 
 ## Related Projects
@@ -130,7 +132,9 @@ Claude Desktop can be used as an MCP client with this proxy server. You can conf
                 "RUST_LOG":"debug,h2=warn",
                 "GRPC_ADDR":"0.0.0.0:9010",
                 "SQLITE_URL":"sqlite:///Users/user_name/jobworkerp_local.sqlite3",
-                "SQLITE_MAX_CONNECTIONS":"10"
+                "SQLITE_MAX_CONNECTIONS":"10",
+                "EXCLUDE_RUNNER_AS_TOOL":"false",
+                "EXCLUDE_WORKER_AS_TOOL":"false"
             }
         }
     }

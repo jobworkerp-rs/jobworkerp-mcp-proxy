@@ -74,6 +74,9 @@ cargo run --bin stdio-proxy-server
 - `JOBWORKERP_ADDR`: プロキシ先のjobworkerpサーバーのURL（デフォルト: `http://127.0.0.1:9000`）
 - `REQUEST_TIMEOUT_SEC`: リクエストタイムアウト時間（秒）（デフォルト: `60`）
 - `RUST_LOG`: ログレベル設定（推奨: `info,h2=warn`）
+- `EXCLUDE_RUNNER_AS_TOOL`: jobworkerpのRunnerをツールから除外します (作成したワークフローやworkerの利用時にコンテキストを減らすために役立ちます)
+- `EXCLUDE_WORKER_AS_TOOL`: jobworkerpのWorkerをツールから除外します (ワークフローの作成時にWorkerを利用しない場合にコンテキストを減らすために役立ちます)
+
 
 ### 環境設定ファイル
 
@@ -96,12 +99,12 @@ REQUEST_TIMEOUT_SEC=60                   # リクエストのタイムアウト�
 RUST_LOG=info,h2=warn                    # ログレベル設定
 
 # All-in-Oneモード用のjobworkerp設定
-GRPC_ADDR=0.0.0.0:9010                   # gRPCサーバーのアドレス
+GRPC_ADDR=0.0.0.0:9010                    # gRPCサーバーのアドレス
 SQLITE_URL="sqlite:///path/to/db.sqlite3" # SQLiteデータベースのパス
-SQLITE_MAX_CONNECTIONS=20                # SQLite最大接続数
+SQLITE_MAX_CONNECTIONS=20                 # SQLite最大接続数
 
 # 分散キューモード用設定（必要な場合）
-REDIS_URL="redis://127.0.0.1:6379/0"     # Redis接続URL
+#REDIS_URL="redis://127.0.0.1:6379/0"     # Redis接続URL
 ```
 
 ## 関連プロジェクト
@@ -130,7 +133,9 @@ Claude Desktopは、このプロキシサーバーとともにMCPクライアン
                 "RUST_LOG":"debug,h2=warn",
                 "GRPC_ADDR":"0.0.0.0:9010",
                 "SQLITE_URL":"sqlite:///Users/user_name/jobworkerp_local.sqlite3",
-                "SQLITE_MAX_CONNECTIONS":"10"
+                "SQLITE_MAX_CONNECTIONS":"10",
+                "EXCLUDE_RUNNER_AS_TOOL":"false",
+                "EXCLUDE_WORKER_AS_TOOL":"false"
             }
         }
     }
