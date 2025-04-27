@@ -18,8 +18,9 @@ license = "Apache 2.0"
 anyhow = "1"
 dotenv = { version = "0.15" }
 futures = "0.3"
-rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "72e7533e413f66e8a24a1f9209c3dc60d2a5e178" }
-rand = { version = "0.8" }
+once_cell = "1"
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "5e4d447b32f3a86d871e2abfbd29f66f097bfaa5" }
+rand = { version = "0.9" }
 serde = { version = "1" }
 serde_json = "1"
 serde_yaml = "0.9"

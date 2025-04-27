@@ -3921,7 +3921,8 @@ dependencies = [
  "dotenv",
  "futures",
  "jobworkerp-client",
- "rand 0.8.5",
+ "once_cell",
+ "rand 0.9.1",
  "rmcp",
  "serde",
  "serde_json",
@@ -4418,7 +4419,7 @@ dependencies = [
 [[package]]
 name = "rmcp"
 version = "0.1.5"
-source = "git+https://github.com/modelcontextprotocol/rust-sdk?rev=72e7533e413f66e8a24a1f9209c3dc60d2a5e178#72e7533e413f66e8a24a1f9209c3dc60d2a5e178"
+source = "git+https://github.com/modelcontextprotocol/rust-sdk?rev=5e4d447b32f3a86d871e2abfbd29f66f097bfaa5#5e4d447b32f3a86d871e2abfbd29f66f097bfaa5"
 dependencies = [
  "axum 0.8.3",
  "base64 0.21.7",
@@ -4444,7 +4445,7 @@ dependencies = [
 [[package]]
 name = "rmcp-macros"
 version = "0.1.5"
-source = "git+https://github.com/modelcontextprotocol/rust-sdk?rev=72e7533e413f66e8a24a1f9209c3dc60d2a5e178#72e7533e413f66e8a24a1f9209c3dc60d2a5e178"
+source = "git+https://github.com/modelcontextprotocol/rust-sdk?rev=5e4d447b32f3a86d871e2abfbd29f66f097bfaa5#5e4d447b32f3a86d871e2abfbd29f66f097bfaa5"
 dependencies = [
  "proc-macro2",
  "quote 1.0.40",

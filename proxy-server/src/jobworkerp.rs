@@ -3,7 +3,10 @@ use anyhow::Result;
 use jobworkerp_client::{
     client::{helper::UseJobworkerpClientHelper, wrapper::JobworkerpClientWrapper},
     error,
-    jobworkerp::data::{ResponseType, Runner, RunnerData, RunnerId, RunnerType, WorkerData},
+    jobworkerp::data::{
+        function_specs, McpToolList, ResponseType, Runner, RunnerData, RunnerId, RunnerType,
+        WorkerData,
+    },
     proto::JobworkerpProto,
 };
 use rmcp::{
@@ -16,9 +19,8 @@ use rmcp::{
     Error as McpError, RoleServer, ServerHandler,
 };
 use serde_json::Value;
-use std::{future::Future, sync::Arc};
+use std::{collections::VecDeque, future::Future, sync::Arc};
 
-const TIMEOUT_SEC: u32 = 60;
 const CREATION_TOOL_DESCRIPTION: &str =
     "Create Tools from workflow definitions provided as JSON. The workflow definition must:
 
@@ -39,10 +41,13 @@ pub struct JobworkerpRouter {
     pub jobworkerp_client: Arc<JobworkerpClientWrapper>,
     pub exclude_worker_as_tool: bool,
     pub exclude_runner_as_tool: bool,
+    pub timeout_sec: u32,
 }
 
 impl JobworkerpRouter {
+    const DEFAULT_TIMEOUT_SEC: u32 = 60 * 60;
     const WORKFLOW_CHANNEL: Option<&str> = Some("workflow");
+
     pub async fn new(config: JobworkerpRouterConfig) -> Result<Self> {
         let jobworkerp_client =
             JobworkerpClientWrapper::new(&config.jobworkerp_address, config.request_timeout_sec)
@@ -51,6 +56,9 @@ impl JobworkerpRouter {
             jobworkerp_client: Arc::new(jobworkerp_client),
             exclude_worker_as_tool: config.exclude_worker_as_tool,
             exclude_runner_as_tool: config.exclude_runner_as_tool,
+            timeout_sec: config
+                .request_timeout_sec
+                .unwrap_or(Self::DEFAULT_TIMEOUT_SEC),
         })
     }
     pub async fn create_workflow(
@@ -104,7 +112,6 @@ impl JobworkerpRouter {
             }
         }
     }
-    // try value.remove(key) -> (string -> parsed json) or json
     pub fn parse_as_json_and_string_with_key_or_noop(
         &self,
         key: &str,
@@ -121,7 +128,6 @@ impl JobworkerpRouter {
             } else if candidate_value.is_string() {
                 match candidate_value {
                     serde_json::Value::String(s) if !s.is_empty() => {
-                        // try parse str as json
                         let parsed =
                             serde_json::from_str::<serde_json::Value>(s.as_str()).or_else(|e| {
                                 tracing::warn!("Failed to parse string as json: {}", e);
@@ -179,22 +185,275 @@ impl JobworkerpRouter {
         &self,
         arguments: serde_json::Map<String, serde_json::Value>,
     ) -> Result<serde_json::Map<String, serde_json::Value>> {
-        // XXX LLM may prefer to use `arguments` instead of `settings` in the request
         let arguments = self.parse_as_json_and_string_with_key_or_noop("arguments", arguments)?;
         let arguments = self.parse_as_json_and_string_with_key_or_noop("settings", arguments)?;
-        // XXX LLM may misread the arguments as same as the INLINE_WORKFLOW (workflow_data)
         self.parse_as_json_and_string_with_key_or_noop("workflow_data", arguments)
+    }
+    fn combine_names(server_name: &str, tool_name: &str) -> String {
+        format!("{}:{}", server_name, tool_name)
+    }
+    fn divide_names(combined: &str) -> Option<(String, String)> {
+        let mut v: VecDeque<&str> = combined.split(":").collect();
+        if v.len() == 2 {
+            Some((v[0].to_string(), v[1].to_string()))
+        } else if v.len() > 2 {
+            let server_name = v.pop_front();
+            Some((
+                server_name.unwrap_or_default().to_string(),
+                v.into_iter()
+                    .map(|s| s.to_string())
+                    .reduce(|acc, n| format!("{}:{}", acc, n))
+                    .unwrap_or_default(),
+            ))
+        } else {
+            tracing::error!("Failed to parse combined name: {:#?}", &combined);
+            None
+        }
+    }
+    async fn find_runner_by_name_with_mcp(
+        &self,
+        name: &str,
+    ) -> Result<Option<(Runner, Option<String>)>> {
+        match self.jobworkerp_client.find_runner_by_name(name).await {
+            Ok(Some(runner)) => {
+                tracing::debug!("found runner: {:?}", &runner);
+                Ok(Some((runner, None)))
+            }
+            Ok(None) => match Self::divide_names(name) {
+                Some((server_name, tool_name)) => {
+                    tracing::debug!(
+                        "found calling to mcp server: {}:{}",
+                        &server_name,
+                        &tool_name
+                    );
+                    self.jobworkerp_client
+                        .find_runner_by_name(&server_name)
+                        .await
+                        .map(|res| res.map(|r| (r, Some(tool_name))))
+                }
+                None => Ok(None),
+            },
+            Err(e) => Err(e),
+        }
+    }
+    async fn find_worker_by_name_with_mcp(
+        &self,
+        name: &str,
+    ) -> Result<Option<(WorkerData, Option<String>)>> {
+        match self.jobworkerp_client.find_worker_by_name(name).await {
+            Ok(Some(worker)) => {
+                tracing::debug!("found worker: {:?}", &worker);
+                Ok(Some((worker.1, None)))
+            }
+            Ok(None) => match Self::divide_names(name) {
+                Some((server_name, tool_name)) => {
+                    tracing::debug!(
+                        "found calling to mcp server: {}:{}",
+                        &server_name,
+                        &tool_name
+                    );
+                    self.jobworkerp_client
+                        .find_worker_by_name(&server_name)
+                        .await
+                        .map(|res| res.map(|r| (r.1, Some(tool_name))))
+                }
+                None => Ok(None),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn handle_reusable_workflow(
+        &self,
+        request: &CallToolRequestParam,
+        runner_id: RunnerId,
+        runner_data: RunnerData,
+    ) -> Result<CallToolResult, McpError> {
+        tracing::debug!("found calling to reusable workflow: {:?}", &runner_data);
+        let arguments = request
+            .arguments
+            .clone()
+            .and_then(|a| self.parse_arguments_for_reusable_workflow(a).ok());
+
+        match arguments {
+            Some(arguments) => {
+                tracing::trace!("workflow_data: {:?}", &arguments);
+                let document = arguments.get("document").cloned();
+                let name = document
+                    .as_ref()
+                    .and_then(|t| t.get("name"))
+                    .and_then(|t| t.as_str().map(|s| s.to_string()))
+                    .unwrap_or(runner_data.name.clone());
+                let description = document
+                    .as_ref()
+                    .and_then(|d| d.get("summary"))
+                    .and_then(|d| d.as_str().map(|s| s.to_string()))
+                    .unwrap_or_default();
+
+                match self
+                    .create_workflow(
+                        runner_id,
+                        runner_data,
+                        &name,
+                        &description,
+                        serde_json::Value::Object(arguments),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        tracing::info!("Workflow created: {}", request.name);
+                        Ok(CallToolResult {
+                            content: vec![Content::json(serde_json::json!({"status": "ok"}))?],
+                            is_error: None,
+                        })
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to create workflow: {}", e);
+                        Err(McpError::internal_error(
+                            format!("Failed to create workflow: {}", e),
+                            None,
+                        ))
+                    }
+                }
+            }
+            _ => {
+                tracing::warn!("Workflow data is not found");
+                Err(McpError::invalid_params(
+                    "Workflow creation requires a workflow json arguments.",
+                    None,
+                ))
+            }
+        }
+    }
+
+    async fn handle_runner_call(
+        &self,
+        request: &CallToolRequestParam,
+        runner: Runner,
+        tool_name_opt: Option<String>,
+    ) -> Result<CallToolResult, McpError> {
+        tracing::debug!("found runner: {:?}, tool: {:?}", &runner, &tool_name_opt);
+        let request_args = request.arguments.clone().unwrap_or_default();
+        let settings = request_args.get("settings").cloned();
+        let arguments = if runner
+            .data
+            .as_ref()
+            .is_some_and(|r| r.runner_type() == RunnerType::McpServer)
+        {
+            Some(serde_json::json!(
+                {
+                    "tool_name": tool_name_opt,
+                    "arg_json": serde_json::to_string(&request_args)
+                        .inspect_err(|e| tracing::error!("Failed to parse settings as json: {}", e)).unwrap_or_default()
+                }
+            ))
+        } else {
+            request_args.get("arguments").cloned()
+        };
+        tracing::debug!(
+            "runner settings: {:#?}, arguments: {:#?}",
+            settings,
+            arguments
+        );
+
+        let result = self
+            .jobworkerp_client
+            .setup_worker_and_enqueue_with_json(
+                runner.data.map(|r| r.name).unwrap().as_str(),
+                settings,
+                None,
+                arguments.unwrap_or(Value::Null),
+                self.timeout_sec,
+            )
+            .await
+            .map_err(|e| match e.downcast_ref() {
+                Some(error::ClientError::NotFound(m)) => {
+                    tracing::info!("Not found: {}", m);
+                    McpError::method_not_found::<CallToolRequestMethod>()
+                }
+                Some(e) => {
+                    tracing::error!("Failed to enqueue job: {}", e);
+                    McpError::internal_error(format!("Failed to enqueue job: {}", e), None)
+                }
+                None => McpError::internal_error(format!("Failed to enqueue job: {}", e), None),
+            })?;
+
+        Ok(CallToolResult {
+            content: vec![Content::json(result)?],
+            is_error: None,
+        })
+    }
+
+    async fn handle_worker_call(
+        &self,
+        request: &CallToolRequestParam,
+    ) -> Result<CallToolResult, McpError> {
+        tracing::info!("runner not found, run as worker: {:?}", &request.name);
+        let request_args = request.arguments.clone().unwrap_or_default();
+
+        let (worker_data, tool_name_opt) = self
+            .find_worker_by_name_with_mcp(&request.name)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to find worker: {}", e);
+                McpError::method_not_found::<CallToolRequestMethod>()
+            })?
+            .ok_or_else(|| {
+                tracing::info!("worker not found");
+                McpError::method_not_found::<CallToolRequestMethod>()
+            })?;
+
+        let args = request_args
+            .get("arguments")
+            .cloned()
+            .unwrap_or(Value::Null);
+
+        let arguments = if worker_data.runner_id.is_some_and(|id| id.value < 0) {
+            tracing::info!("worker is reusable workflow");
+            serde_json::json!({
+                "input": args.to_string(),
+            })
+        } else {
+            if let Some(tool_name) = tool_name_opt {
+                serde_json::json!(
+                    {
+                        "tool_name": tool_name,
+                        "arg_json": args
+                    }
+                )
+            } else {
+                args
+            }
+        };
+
+        let result = self
+            .jobworkerp_client
+            .enqueue_with_json(&worker_data, arguments.clone(), self.timeout_sec)
+            .await
+            .map_err(|e| match e.downcast_ref() {
+                Some(error::ClientError::NotFound(m)) => {
+                    tracing::info!("Not found: {}", m);
+                    McpError::method_not_found::<CallToolRequestMethod>()
+                }
+                Some(e) => {
+                    tracing::error!("Failed to enqueue job: {}", e);
+                    McpError::internal_error(format!("Failed to enqueue job: {}", e), None)
+                }
+                None => McpError::internal_error(format!("Failed to enqueue job: {}", e), None),
+            })?;
+
+        Ok(CallToolResult {
+            content: vec![Content::json(result)?],
+            is_error: None,
+        })
     }
 }
 
-// https://github.com/modelcontextprotocol/rust-sdk/blob/main/crates/rmcp/src/handler/server.rs
 impl ServerHandler for JobworkerpRouter {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: ProtocolVersion::V_2024_11_05,
             capabilities: ServerCapabilities::builder()
-                // .enable_prompts()
-                // .enable_resources()
                 .enable_tools()
                 .build(),
             server_info: Implementation::from_build_env(),
@@ -206,189 +465,28 @@ impl ServerHandler for JobworkerpRouter {
     fn call_tool(
         &self,
         request: CallToolRequestParam,
-        _context: RequestContext<RoleServer>, // TODO use to cancel job
+        _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
-        // std::future::ready(Err(McpError::method_not_found::<CallToolRequestMethod>()))
         async move {
             tracing::debug!("call_tool: {:?}", &request);
-            match self
-                .jobworkerp_client
-                .find_runner_by_name(&request.name)
-                .await
-            {
-                // create workflow
-                Ok(Some(Runner {
-                    id: Some(rid),
-                    data: Some(rdata),
-                })) if rdata.runner_type == RunnerType::ReusableWorkflow as i32 => {
-                    tracing::debug!("found calling to reusable workflow: {:?}", &rdata);
-                    let arguments = request
-                        .arguments
-                        .and_then(|a| self.parse_arguments_for_reusable_workflow(a).ok());
-                    match arguments {
-                        Some(arguments) => {
-                            tracing::trace!("workflow_data: {:?}", &arguments);
-                            let document = arguments.get("document").cloned();
-                            let name = document
-                                .as_ref()
-                                .and_then(|t| t.get("name"))
-                                .and_then(|t| t.as_str().map(|s| s.to_string()))
-                                .unwrap_or(rdata.name.clone());
-                            let description = document
-                                .as_ref()
-                                .and_then(|d| d.get("summary"))
-                                .and_then(|d| d.as_str().map(|s| s.to_string()))
-                                .unwrap_or_default();
-                            match self
-                                .create_workflow(
-                                    rid,
-                                    rdata,
-                                    &name,
-                                    &description,
-                                    serde_json::Value::Object(arguments),
-                                )
-                                .await
-                            {
-                                Ok(_) => {
-                                    tracing::info!("Workflow created: {}", request.name);
-                                    Ok(CallToolResult {
-                                        content: vec![Content::json(
-                                            serde_json::json!({"status": "ok"}),
-                                        )?],
-                                        is_error: None,
-                                    })
-                                }
-                                Err(e) => {
-                                    tracing::error!("Failed to create workflow: {}", e);
-                                    Err(McpError::internal_error(
-                                        format!("Failed to create workflow: {}", e),
-                                        None,
-                                    ))
-                                }
-                            }
-                        }
-                        _ => {
-                            tracing::warn!("Workflow data is not found");
-                            return Err(McpError::invalid_params(
-                                "Workflow creation requires a workflow json arguments.",
-                                None,
-                            ));
-                        }
-                    }
-                }
-                Ok(Some(runner)) => {
-                    tracing::debug!("found runner: {:?}", &runner);
-                    // runner
-                    let request_args = request.arguments.unwrap_or_default();
-                    let settings = request_args.get("settings").cloned();
-                    let arguments = request_args.get("arguments").cloned();
-                    // TODO set worker name and other params
-                    let result = self
-                        .jobworkerp_client
-                        .setup_worker_and_enqueue_with_json(
-                            runner.data.map(|r| r.name).unwrap().as_str(), // runner(runner) name
-                            settings,                                      // runner_settings data
-                            None, // worker parameters (if not exists, use default values)
-                            arguments.unwrap_or(Value::Null), // enqueue job args
-                            TIMEOUT_SEC, // job timeout in seconds
-                        )
-                        .await
-                        .map_err(|e| match e.downcast_ref() {
-                            Some(error::ClientError::NotFound(m)) => {
-                                tracing::info!("Not found: {}", m);
-                                McpError::method_not_found::<CallToolRequestMethod>()
-                            }
-                            Some(e) => {
-                                tracing::error!("Failed to enqueue job: {}", e);
-                                McpError::internal_error(
-                                    format!("Failed to enqueue job: {}", e),
-                                    None,
-                                )
-                            }
-                            None => McpError::internal_error(
-                                format!("Failed to enqueue job: {}", e),
-                                None,
-                            ),
-                        })?;
-                    Ok(CallToolResult {
-                        content: vec![Content::json(result)?],
-                        is_error: None,
-                    })
-                }
-                Ok(None) => {
-                    tracing::info!("runner not found, run as worker: {:?}", &request.name);
-                    let request_args = request.arguments.unwrap_or_default();
-                    let (_wid, wdata) = self
-                        .jobworkerp_client
-                        .find_worker_by_name(&request.name)
-                        .await
-                        .map_err(|e| {
-                            tracing::error!("Failed to find worker: {}", e);
-                            McpError::method_not_found::<CallToolRequestMethod>()
-                        })?
-                        .ok_or_else(|| {
-                            tracing::info!("worker not found");
-                            McpError::method_not_found::<CallToolRequestMethod>()
-                        })?;
-                    let args = request_args
-                        .get("arguments")
-                        .cloned()
-                        .unwrap_or(Value::Null);
 
-                    // XXX negative runner_id is now used only for ReusableWorkflow
-                    let arguments = if wdata.runner_id.is_some_and(|id| id.value < 0) {
-                        tracing::info!("worker is reusable workflow");
-                        // // XXX over-wrapping arguments as object by llm...
-                        // let args = match args {
-                        //     Value::Object(arguments) => arguments
-                        //         .get("arguments")
-                        //         .cloned()
-                        //         .unwrap_or(Value::Object(arguments)),
-                        //     a => a,
-                        // };
-                        serde_json::json!({
-                            "input": args.to_string(),
-                        })
-                    } else {
-                        args
-                    };
-                    tracing::debug!("======= arguments: {:#?}", &arguments);
-                    let result = self
-                        .jobworkerp_client
-                        .enqueue_with_json(
-                            &wdata,
-                            arguments.clone(),
-                            TIMEOUT_SEC, // job timeout in seconds
-                        )
-                        .await
-                        .map_err(|e| match e.downcast_ref() {
-                            Some(error::ClientError::NotFound(m)) => {
-                                tracing::info!("Not found: {}", m);
-                                McpError::method_not_found::<CallToolRequestMethod>()
-                            }
-                            Some(e) => {
-                                tracing::error!("Failed to enqueue job: {}", e);
-                                McpError::internal_error(
-                                    format!("Failed to enqueue job: {}", e),
-                                    None,
-                                )
-                            }
-                            None => McpError::internal_error(
-                                format!("Failed to enqueue job: {}", e),
-                                None,
-                            ),
-                        })?;
-                    Ok(CallToolResult {
-                        content: vec![Content::json(result)?],
-                        is_error: None,
-                    })
+            match self.find_runner_by_name_with_mcp(&request.name).await {
+                Ok(Some((
+                    Runner {
+                        id: Some(rid),
+                        data: Some(rdata),
+                    },
+                    _,
+                ))) if rdata.runner_type == RunnerType::ReusableWorkflow as i32 => {
+                    self.handle_reusable_workflow(&request, rid, rdata).await
                 }
+                Ok(Some((runner, tool_name_opt))) => {
+                    self.handle_runner_call(&request, runner, tool_name_opt)
+                        .await
+                }
+                Ok(None) => self.handle_worker_call(&request).await,
                 Err(e) => {
                     tracing::error!("error: {:#?}", &e);
-                    // Err(McpError::internal_error(
-                    //     format!("Failed to find runner: {}", e),
-                    //     None,
-                    // ))
                     Err(McpError::method_not_found::<CallToolRequestMethod>())
                 }
             }
@@ -396,7 +494,7 @@ impl ServerHandler for JobworkerpRouter {
     }
     fn list_tools(
         &self,
-        _request: PaginatedRequestParam,
+        _request: Option<PaginatedRequestParam>,
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
         async move {
@@ -410,40 +508,93 @@ impl ServerHandler for JobworkerpRouter {
             let tool_list = functions
                 .into_iter()
                 .flat_map(|tool| {
-                    // ReusableWorkflow Runner is displayed as workflow(function) creation tool
-                    if tool.worker_id.is_none() && tool.runner_id.is_some_and(|id| id.value < 0) {
-                        Some(Tool::new(
+                    if tool.worker_id.is_none()
+                        && tool.runner_type == RunnerType::ReusableWorkflow as i32
+                    {
+                        vec![Tool::new(
                             tool.name,
                             CREATION_TOOL_DESCRIPTION,
-                            tool.input_schema
-                                .and_then(|s| {
-                                    s.settings.and_then(|f| {
-                                        serde_json::from_str(f.as_str())
-                                            .or_else(|e1| {
-                                                tracing::warn!(
-                                                    "Failed to parse settings as json: {}",
-                                                    e1
-                                                );
-                                                serde_yaml::from_str(f.as_str()).inspect_err(|e2| {
+                            tool.schema
+                                .and_then(|s| match s {
+                                    function_specs::Schema::SingleSchema(function) => {
+                                        function.settings.and_then(|f| {
+                                            serde_json::from_str(f.as_str())
+                                                .or_else(|e1| {
                                                     tracing::warn!(
+                                                        "Failed to parse settings as json: {}",
+                                                        e1
+                                                    );
+                                                    serde_yaml::from_str(f.as_str()).inspect_err(
+                                                        |e2| {
+                                                            tracing::warn!(
                                                         "Failed to parse settings as yaml: {}",
                                                         e2
                                                     );
+                                                        },
+                                                    )
                                                 })
-                                            })
-                                            .ok()
-                                    })
+                                                .ok()
+                                        })
+                                    }
+                                    function_specs::Schema::McpTools(mcp) => {
+                                        let mes = format!(
+                                            "error: expect workflow but got mcp: {:?}",
+                                            mcp
+                                        );
+                                        tracing::error!(mes);
+                                        None
+                                    }
                                 })
                                 .unwrap_or(serde_json::json!({}))
                                 .as_object()
                                 .cloned()
                                 .unwrap_or_default(),
-                        ))
+                        )]
+                    } else if tool.runner_type == RunnerType::McpServer as i32 {
+                        let server_name = tool.name.as_str();
+                        match tool.schema {
+                            Some(function_specs::Schema::McpTools(McpToolList { list })) => list
+                                .into_iter()
+                                .map(|tool| {
+                                    Tool::new(
+                                        Self::combine_names(server_name, tool.name.as_str()),
+                                        tool.description.unwrap_or_default(),
+                                        serde_json::from_str(tool.input_schema.as_str())
+                                            .unwrap_or(serde_json::json!({}))
+                                            .as_object()
+                                            .cloned()
+                                            .unwrap_or_default(),
+                                    )
+                                })
+                                .collect(),
+                            Some(function_specs::Schema::SingleSchema(function)) => {
+                                tracing::error!(
+                                    "error: expect workflow but got function: {:?}",
+                                    function
+                                );
+                                vec![]
+                            }
+                            None => {
+                                tracing::error!("error: expect workflow but got none: {:?}", &tool);
+                                vec![]
+                            }
+                        }
                     } else {
                         let mut schema_combiner = SchemaCombiner::new();
-                        tool.input_schema
+                        tool.schema
                             .as_ref()
-                            .and_then(|s| s.settings.clone())
+                            .and_then(|s| match s {
+                                function_specs::Schema::SingleSchema(function) => {
+                                    function.settings.clone()
+                                }
+                                function_specs::Schema::McpTools(_) => {
+                                    tracing::error!(
+                                        "got mcp tool in not mcp tool runner type: {:#?}",
+                                        &tool
+                                    );
+                                    None
+                                }
+                            })
                             .and_then(|s| {
                                 schema_combiner
                                     .add_schema_from_string(
@@ -456,21 +607,37 @@ impl ServerHandler for JobworkerpRouter {
                                     })
                                     .ok()
                             });
-                        tool.input_schema.and_then(|s| {
-                            schema_combiner
-                                .add_schema_from_string(
-                                    "arguments",
-                                    s.arguments.as_str(),
-                                    Some("Tool arguments".to_string()),
-                                )
-                                .inspect_err(|e| tracing::error!("Failed to parse schema: {}", e))
-                                .ok()
-                        });
+                        tool.schema
+                            .as_ref()
+                            .map(|s| match s {
+                                function_specs::Schema::SingleSchema(function) => {
+                                    function.arguments.clone()
+                                }
+                                function_specs::Schema::McpTools(_) => {
+                                    tracing::error!(
+                                        "got mcp tool in not mcp tool runner type: {:#?}",
+                                        &tool
+                                    );
+                                    "".to_string()
+                                }
+                            })
+                            .and_then(|args| {
+                                schema_combiner
+                                    .add_schema_from_string(
+                                        "arguments",
+                                        args.as_str(),
+                                        Some("Tool arguments".to_string()),
+                                    )
+                                    .inspect_err(|e| {
+                                        tracing::error!("Failed to parse schema: {}", e)
+                                    })
+                                    .ok()
+                            });
                         match schema_combiner.generate_combined_schema() {
-                            Ok(schema) => Some(Tool::new(tool.name, tool.description, schema)),
+                            Ok(schema) => vec![Tool::new(tool.name, tool.description, schema)],
                             Err(e) => {
                                 tracing::error!("Failed to generate schema: {}", e);
-                                None
+                                vec![]
                             }
                         }
                     }
@@ -481,52 +648,12 @@ impl ServerHandler for JobworkerpRouter {
                 tools: tool_list,
                 next_cursor: None,
             })
-            // std::future::ready(Ok(ListToolsResult::default()))
         }
     }
     fn on_cancelled(
         &self,
         _notification: CancelledNotificationParam,
     ) -> impl Future<Output = ()> + Send + '_ {
-        // TODO cancel the job
         std::future::ready(())
     }
-    // TODO: Implement the following methods
-    // fn get_prompt(
-    //     &self,
-    //     request: GetPromptRequestParam,
-    //     context: RequestContext<RoleServer>,
-    // ) -> impl Future<Output = Result<GetPromptResult, McpError>> + Send + '_ {
-    //     std::future::ready(Err(McpError::method_not_found::<GetPromptRequestMethod>()))
-    // }
-    // fn list_prompts(
-    //     &self,
-    //     request: PaginatedRequestParam,
-    //     context: RequestContext<RoleServer>,
-    // ) -> impl Future<Output = Result<ListPromptsResult, McpError>> + Send + '_ {
-    //     std::future::ready(Ok(ListPromptsResult::default()))
-    // }
-    // fn list_resources(
-    //     &self,
-    //     request: PaginatedRequestParam,
-    //     context: RequestContext<RoleServer>,
-    // ) -> impl Future<Output = Result<ListResourcesResult, McpError>> + Send + '_ {
-    //     std::future::ready(Ok(ListResourcesResult::default()))
-    // }
-    // fn list_resource_templates(
-    //     &self,
-    //     request: PaginatedRequestParam,
-    //     context: RequestContext<RoleServer>,
-    // ) -> impl Future<Output = Result<ListResourceTemplatesResult, McpError>> + Send + '_ {
-    //     std::future::ready(Ok(ListResourceTemplatesResult::default()))
-    // }
-    // fn read_resource(
-    //     &self,
-    //     request: ReadResourceRequestParam,
-    //     context: RequestContext<RoleServer>,
-    // ) -> impl Future<Output = Result<ReadResourceResult, McpError>> + Send + '_ {
-    //     std::future::ready(Err(
-    //         McpError::method_not_found::<ReadResourceRequestMethod>(),
-    //     ))
-    // }
 }
