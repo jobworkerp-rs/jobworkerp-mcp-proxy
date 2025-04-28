@@ -70,39 +70,22 @@ pub async fn boot_sse_server() -> Result<()> {
     };
 
     let mut sse_server = SseServer::serve_with_config(sse_config).await?;
-    let ct = sse_server.config.ct.child_token();
     let service = JobworkerpRouter::new(config).await?;
 
-    // XXX workaround for sse_server
-    loop {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!("ctrl-c signal received");
-                ct.cancel();
-                break;
-            }
-            result = {
-                let service = service.clone();
-                let sse_server = &mut sse_server;
-                async move {
-                    let transport = sse_server
-                        .next_transport()
-                        .await
-                        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to get transport"))?;
-                    service.serve(transport).await
-                }
-            } => {
-                match result {
-                    Ok(_r) => {
-                        tracing::info!("sse server transport got");
-                    }
-                    Err(e) => {
-                        tracing::error!("Error serving transport: {}", e);
-                    }
-                }
-            }
+    let ct = sse_server.config.ct.clone();
+    tokio::spawn(async move {
+        while let Some(transport) = sse_server.next_transport().await {
+            let service = service.clone();
+            let ct = sse_server.config.ct.child_token();
+            tokio::spawn(async move {
+                let server = service.serve_with_ct(transport, ct).await?;
+                server.waiting().await?;
+                tokio::io::Result::Ok(())
+            });
         }
-    }
+    });
+    tokio::signal::ctrl_c().await?;
+    ct.cancel();
 
     Ok(())
 }
