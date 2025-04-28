@@ -28,6 +28,7 @@ Jobworkerp MCPプロキシサーバーは、MCPクライアントからMCPツー
 ### All-in-Oneモード
 
 jobworkerp-rsを含めたAll-in-Oneパッケージ（`all-in-one/`ディレクトリ）としてビルドすると、単一のバイナリでMCPサーバーとして動作します。このモードでは、プロキシサーバーとjobworkerpサーバーの両方の機能が一つのプロセスで実行されます。
+jobworkerp-rs の mcp-proxy-server機能を使うには実行ディレクトリに`mcp-settings.toml`を置いてください。
 
 **特徴:**
 

@@ -17,7 +17,7 @@ path = "src/client.rs"
 
 [dependencies]
 proxy-server = { path = "../proxy-server" }
-jobworkerp-main = { git = "https://github.com/jobworkerp-rs/jobworkerp-rs.git", rev = "ee8e4eebff247926716d5110e1ca015297481888" }
+jobworkerp-main = { git = "https://github.com/jobworkerp-rs/jobworkerp-rs.git", branch = "main" }
 
 anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"] }
