@@ -45,6 +45,7 @@ pub struct JobworkerpRouter {
 }
 
 impl JobworkerpRouter {
+    const DELIMITER: &str = "___";
     const DEFAULT_TIMEOUT_SEC: u32 = 60 * 60;
     const WORKFLOW_CHANNEL: Option<&str> = Some("workflow");
 
@@ -190,10 +191,10 @@ impl JobworkerpRouter {
         self.parse_as_json_and_string_with_key_or_noop("workflow_data", arguments)
     }
     fn combine_names(server_name: &str, tool_name: &str) -> String {
-        format!("{}:{}", server_name, tool_name)
+        format!("{}{}{}", server_name, Self::DELIMITER, tool_name)
     }
     fn divide_names(combined: &str) -> Option<(String, String)> {
-        let mut v: VecDeque<&str> = combined.split(":").collect();
+        let mut v: VecDeque<&str> = combined.split(Self::DELIMITER).collect();
         if v.len() == 2 {
             Some((v[0].to_string(), v[1].to_string()))
         } else if v.len() > 2 {
@@ -202,7 +203,7 @@ impl JobworkerpRouter {
                 server_name.unwrap_or_default().to_string(),
                 v.into_iter()
                     .map(|s| s.to_string())
-                    .reduce(|acc, n| format!("{}:{}", acc, n))
+                    .reduce(|acc, n| format!("{}{}{}", acc, Self::DELIMITER, n))
                     .unwrap_or_default(),
             ))
         } else {
