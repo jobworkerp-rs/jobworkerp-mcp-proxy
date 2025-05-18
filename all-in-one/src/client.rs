@@ -1,12 +1,14 @@
 use anyhow::Result;
-use rmcp::{
-    model::{CallToolRequestParam, ClientCapabilities, ClientInfo, Implementation}, transport::SseClientTransport, ServiceExt
-};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use clap::Parser;
+use rmcp::{
+    ServiceExt,
+    model::{CallToolRequestParam, ClientCapabilities, ClientInfo, Implementation},
+    transport::SseClientTransport,
+};
 use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]

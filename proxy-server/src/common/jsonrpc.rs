@@ -112,7 +112,7 @@ impl SchemaCombiner {
             obj.remove("$schema");
 
             // Recursively remove $schema from sub-schemas
-            let cleaned_obj = self.clean_object(obj);
+            let cleaned_obj = Self::clean_object(obj);
             Value::Object(cleaned_obj)
         } else {
             schema
@@ -120,7 +120,7 @@ impl SchemaCombiner {
     }
 
     /// Recursively remove $schema keyword from all sub-schemas in an object
-    fn clean_object(&self, obj: Map<String, Value>) -> Map<String, Value> {
+    fn clean_object(obj: Map<String, Value>) -> Map<String, Value> {
         let mut result = Map::new();
 
         for (key, value) in obj {
@@ -128,12 +128,12 @@ impl SchemaCombiner {
                 Value::Object(sub_obj) => {
                     let mut new_obj = sub_obj.clone();
                     new_obj.remove("$schema");
-                    Value::Object(self.clean_object(new_obj))
+                    Value::Object(Self::clean_object(new_obj))
                 }
                 Value::Array(arr) => Value::Array(
                     arr.into_iter()
                         .map(|item| match item {
-                            Value::Object(sub_obj) => Value::Object(self.clean_object(sub_obj)),
+                            Value::Object(sub_obj) => Value::Object(Self::clean_object(sub_obj)),
                             _ => item,
                         })
                         .collect(),
@@ -181,7 +181,7 @@ impl SchemaCombiner {
 
         combined
             .as_object()
-            .map(|obj| obj.clone())
+            .cloned()
             .ok_or_else(|| anyhow::anyhow!("Failed to get combined schema object"))
     }
 

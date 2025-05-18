@@ -196,20 +196,22 @@ impl JobworkerpRouter {
     }
     fn divide_names(combined: &str) -> Option<(String, String)> {
         let mut v: VecDeque<&str> = combined.split(Self::DELIMITER).collect();
-        if v.len() == 2 {
-            Some((v[0].to_string(), v[1].to_string()))
-        } else if v.len() > 2 {
-            let server_name = v.pop_front();
-            Some((
-                server_name.unwrap_or_default().to_string(),
-                v.into_iter()
-                    .map(|s| s.to_string())
-                    .reduce(|acc, n| format!("{}{}{}", acc, Self::DELIMITER, n))
-                    .unwrap_or_default(),
-            ))
-        } else {
-            tracing::error!("Failed to parse combined name: {:#?}", &combined);
-            None
+        match v.len().cmp(&2) {
+            std::cmp::Ordering::Less => {
+                tracing::error!("Failed to parse combined name: {:#?}", &combined);
+                None
+            }
+            std::cmp::Ordering::Equal => Some((v[0].to_string(), v[1].to_string())),
+            std::cmp::Ordering::Greater => {
+                let server_name = v.pop_front();
+                Some((
+                    server_name.unwrap_or_default().to_string(),
+                    v.into_iter()
+                        .map(|s| s.to_string())
+                        .reduce(|acc, n| format!("{}{}{}", acc, Self::DELIMITER, n))
+                        .unwrap_or_default(),
+                ))
+            }
         }
     }
     async fn find_runner_by_name_with_mcp(
@@ -415,17 +417,15 @@ impl JobworkerpRouter {
             serde_json::json!({
                 "input": args.to_string(),
             })
+        } else if let Some(tool_name) = tool_name_opt {
+            serde_json::json!(
+                {
+                    "tool_name": tool_name,
+                    "arg_json": args
+                }
+            )
         } else {
-            if let Some(tool_name) = tool_name_opt {
-                serde_json::json!(
-                    {
-                        "tool_name": tool_name,
-                        "arg_json": args
-                    }
-                )
-            } else {
-                args
-            }
+            args
         };
 
         let result = self
@@ -464,6 +464,7 @@ impl ServerHandler for JobworkerpRouter {
             ),
         }
     }
+    #[allow(clippy::manual_async_fn)]
     fn call_tool(
         &self,
         request: CallToolRequestParam,
@@ -494,6 +495,7 @@ impl ServerHandler for JobworkerpRouter {
             }
         }
     }
+    #[allow(clippy::manual_async_fn)]
     fn list_tools(
         &self,
         _request: Option<PaginatedRequestParam>,
