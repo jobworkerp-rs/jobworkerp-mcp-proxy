@@ -1,8 +1,6 @@
 use anyhow::Result;
 use rmcp::{
-    ServiceExt,
-    model::{CallToolRequestParam, ClientCapabilities, ClientInfo, Implementation},
-    transport::SseTransport,
+    model::{CallToolRequestParam, ClientCapabilities, ClientInfo, Implementation}, transport::SseClientTransport, ServiceExt
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use clap::Parser;
@@ -39,7 +37,7 @@ async fn main() -> Result<()> {
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
-    let transport = SseTransport::start("http://localhost:8000/sse").await?;
+    let transport = SseClientTransport::start("http://localhost:8000/sse").await?;
     println!("Connected to SSE server");
 
     let client_info = ClientInfo {

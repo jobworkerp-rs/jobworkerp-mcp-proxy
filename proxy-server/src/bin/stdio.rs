@@ -26,6 +26,9 @@ async fn main() -> Result<()> {
         .ok()
         .and_then(|s| s.parse::<bool>().ok())
         .unwrap_or_default();
+    let set_name = std::env::var("TOOL_SET_NAME")
+        .ok()
+        .and_then(|s| s.parse::<String>().ok());
 
     tracing::info!(
         "Starting MCP server {} {}",
@@ -45,6 +48,7 @@ async fn main() -> Result<()> {
         request_timeout_sec,
         exclude_runner_as_tool,
         exclude_worker_as_tool,
+        set_name,
     };
 
     proxy_server::boot_stdio_server(config).await

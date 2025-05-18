@@ -3,10 +3,8 @@ use anyhow::Result;
 use jobworkerp_client::{
     client::{helper::UseJobworkerpClientHelper, wrapper::JobworkerpClientWrapper},
     error,
-    jobworkerp::data::{
-        function_specs, McpToolList, ResponseType, Runner, RunnerData, RunnerId, RunnerType,
-        WorkerData,
-    },
+    jobworkerp::data::{ResponseType, Runner, RunnerData, RunnerId, RunnerType, WorkerData},
+    jobworkerp::function::data::{function_specs, McpToolList},
     proto::JobworkerpProto,
 };
 use rmcp::{
@@ -34,6 +32,7 @@ pub struct JobworkerpRouterConfig {
     pub request_timeout_sec: Option<u32>,
     pub exclude_worker_as_tool: bool,
     pub exclude_runner_as_tool: bool,
+    pub set_name: Option<String>,
 }
 
 #[derive(Clone)]
@@ -41,6 +40,7 @@ pub struct JobworkerpRouter {
     pub jobworkerp_client: Arc<JobworkerpClientWrapper>,
     pub exclude_worker_as_tool: bool,
     pub exclude_runner_as_tool: bool,
+    pub set_name: Option<String>,
     pub timeout_sec: u32,
 }
 
@@ -57,6 +57,7 @@ impl JobworkerpRouter {
             jobworkerp_client: Arc::new(jobworkerp_client),
             exclude_worker_as_tool: config.exclude_worker_as_tool,
             exclude_runner_as_tool: config.exclude_runner_as_tool,
+            set_name: config.set_name,
             timeout_sec: config
                 .request_timeout_sec
                 .unwrap_or(Self::DEFAULT_TIMEOUT_SEC),
@@ -499,13 +500,21 @@ impl ServerHandler for JobworkerpRouter {
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
         async move {
-            let functions = self
-                .jobworkerp_client
-                .find_function_list(self.exclude_runner_as_tool, self.exclude_worker_as_tool)
-                .await
-                .map_err(|e| {
-                    McpError::internal_error(format!("Failed to find tools: {}", e), None)
-                })?;
+            let functions = if let Some(name) = self.set_name.as_ref() {
+                self.jobworkerp_client
+                    .find_function_list_by_set(name.as_str())
+                    .await
+                    .map_err(|e| {
+                        McpError::internal_error(format!("Failed to find tools: {}", e), None)
+                    })
+            } else {
+                self.jobworkerp_client
+                    .find_function_list(self.exclude_runner_as_tool, self.exclude_worker_as_tool)
+                    .await
+                    .map_err(|e| {
+                        McpError::internal_error(format!("Failed to find tools: {}", e), None)
+                    })
+            }?;
             let tool_list = functions
                 .into_iter()
                 .flat_map(|tool| {

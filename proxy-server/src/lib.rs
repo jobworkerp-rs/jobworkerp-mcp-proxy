@@ -40,18 +40,28 @@ pub async fn boot_sse_server() -> Result<()> {
         .ok()
         .and_then(|s| s.parse::<bool>().ok())
         .unwrap_or_default();
+    let set_name = std::env::var("TOOL_SET_NAME")
+        .ok()
+        .and_then(|s| s.parse::<String>().ok());
 
     tracing::info!(
-        "Starting MCP server {} {}",
-        if exclude_runner_as_tool {
-            "without runner"
+        "Starting MCP server {}",
+        if let Some(set_name) = &set_name {
+            format!("with tool set name '{set_name}'")
         } else {
-            "with runner"
-        },
-        if exclude_worker_as_tool {
-            "without worker as tool"
-        } else {
-            "with worker as tool"
+            format!(
+                "{} {}",
+                if exclude_runner_as_tool {
+                    "without runner"
+                } else {
+                    "with runner"
+                },
+                if exclude_worker_as_tool {
+                    "without worker as tool"
+                } else {
+                    "with worker as tool"
+                }
+            )
         }
     );
     let config = JobworkerpRouterConfig {
@@ -59,6 +69,7 @@ pub async fn boot_sse_server() -> Result<()> {
         request_timeout_sec,
         exclude_runner_as_tool,
         exclude_worker_as_tool,
+        set_name,
     };
 
     let sse_config = SseServerConfig {
