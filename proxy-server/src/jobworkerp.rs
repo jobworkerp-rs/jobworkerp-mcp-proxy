@@ -3,8 +3,10 @@ use anyhow::Result;
 use jobworkerp_client::{
     client::{helper::UseJobworkerpClientHelper, wrapper::JobworkerpClientWrapper},
     error,
-    jobworkerp::data::{ResponseType, Runner, RunnerData, RunnerId, RunnerType, WorkerData},
-    jobworkerp::function::data::{function_specs, McpToolList},
+    jobworkerp::{
+        data::{ResponseType, Runner, RunnerData, RunnerId, RunnerType, WorkerData},
+        function::data::{function_specs, FunctionSpecs, McpToolList},
+    },
     proto::JobworkerpProto,
 };
 use rmcp::{
@@ -449,20 +451,164 @@ impl JobworkerpRouter {
             is_error: None,
         })
     }
+
+    pub fn convert_functions_to_tools(
+        functions: Vec<FunctionSpecs>,
+    ) -> Result<ListToolsResult, McpError> {
+        fn convert_reusable_workflow(tool: &FunctionSpecs) -> Option<Tool> {
+            Some(Tool::new(
+                tool.name.clone(),
+                CREATION_TOOL_DESCRIPTION,
+                tool.schema
+                    .as_ref()
+                    .and_then(|s| match s {
+                        function_specs::Schema::SingleSchema(function) => {
+                            function.settings.as_ref().and_then(|f| {
+                                serde_json::from_str(f.as_str())
+                                    .or_else(|e1| {
+                                        tracing::warn!("Failed to parse settings as json: {}", e1);
+                                        serde_yaml::from_str(f.as_str()).inspect_err(|e2| {
+                                            tracing::warn!(
+                                                "Failed to parse settings as yaml: {}",
+                                                e2
+                                            );
+                                        })
+                                    })
+                                    .ok()
+                            })
+                        }
+                        function_specs::Schema::McpTools(mcp) => {
+                            let mes = format!("error: expect workflow but got mcp: {:?}", mcp);
+                            tracing::error!(mes);
+                            None
+                        }
+                    })
+                    .unwrap_or(serde_json::json!({}))
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default(),
+            ))
+        }
+
+        fn convert_mcp_server(tool: &FunctionSpecs) -> Vec<Tool> {
+            let server_name = tool.name.as_str();
+            match &tool.schema {
+                Some(function_specs::Schema::McpTools(McpToolList { list })) => list
+                    .iter()
+                    .map(|tool| {
+                        Tool::new(
+                            JobworkerpRouter::combine_names(server_name, tool.name.as_str()),
+                            tool.description.clone().unwrap_or_default(),
+                            serde_json::from_str(tool.input_schema.as_str())
+                                .unwrap_or(serde_json::json!({}))
+                                .as_object()
+                                .cloned()
+                                .unwrap_or_default(),
+                        )
+                    })
+                    .collect(),
+                Some(function_specs::Schema::SingleSchema(function)) => {
+                    tracing::error!("error: expect workflow but got function: {:?}", function);
+                    vec![]
+                }
+                None => {
+                    tracing::error!("error: expect workflow but got none: {:?}", &tool);
+                    vec![]
+                }
+            }
+        }
+
+        fn convert_normal_function(tool: &FunctionSpecs) -> Option<Tool> {
+            let mut schema_combiner = SchemaCombiner::new();
+            tool.schema
+                .as_ref()
+                .and_then(|s| match s {
+                    function_specs::Schema::SingleSchema(function) => function.settings.clone(),
+                    function_specs::Schema::McpTools(_) => {
+                        tracing::error!("got mcp tool in not mcp tool runner type: {:#?}", &tool);
+                        None
+                    }
+                })
+                .and_then(|s| {
+                    schema_combiner
+                        .add_schema_from_string(
+                            "settings",
+                            s.as_str(),
+                            Some("Tool init settings".to_string()),
+                        )
+                        .inspect_err(|e| tracing::error!("Failed to parse schema: {}", e))
+                        .ok()
+                });
+            tool.schema
+                .as_ref()
+                .map(|s| match s {
+                    function_specs::Schema::SingleSchema(function) => function.arguments.clone(),
+                    function_specs::Schema::McpTools(_) => {
+                        tracing::error!("got mcp tool in not mcp tool runner type: {:#?}", &tool);
+                        "".to_string()
+                    }
+                })
+                .and_then(|args| {
+                    schema_combiner
+                        .add_schema_from_string(
+                            "arguments",
+                            args.as_str(),
+                            Some("Tool arguments".to_string()),
+                        )
+                        .inspect_err(|e| tracing::error!("Failed to parse schema: {}", e))
+                        .ok()
+                });
+            match schema_combiner.generate_combined_schema() {
+                Ok(schema) => Some(Tool::new(
+                    tool.name.clone(),
+                    tool.description.clone(),
+                    schema,
+                )),
+                Err(e) => {
+                    tracing::error!("Failed to generate schema: {}", e);
+                    None
+                }
+            }
+        }
+
+        let tool_list = functions
+            .into_iter()
+            .flat_map(|tool| {
+                if tool.worker_id.is_none()
+                    && tool.runner_type == RunnerType::ReusableWorkflow as i32
+                {
+                    convert_reusable_workflow(&tool)
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                } else if tool.runner_type == RunnerType::McpServer as i32 {
+                    convert_mcp_server(&tool)
+                } else {
+                    convert_normal_function(&tool)
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                }
+            })
+            .collect::<Vec<_>>();
+
+        Ok(ListToolsResult {
+            tools: tool_list,
+            next_cursor: None,
+        })
+    }
 }
 
 impl ServerHandler for JobworkerpRouter {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder()
-                .enable_tools()
-                .build(),
-            server_info: Implementation::from_build_env(),
-            instructions: Some(
-                "The system runs as an asynchronous job processing server that executes various functions in parallel. It supports general-purpose processing tasks like shell commands and HTTP/gRPC requests, while allowing users to create workflows through JSON-defined specifications. These workflows can compose multiple functions with defined input/output schemas, with all operations managed concurrently for efficient execution.".to_string(),
-            ),
-        }
+                protocol_version: ProtocolVersion::V_2024_11_05,
+                capabilities: ServerCapabilities::builder()
+                    .enable_tools()
+                    .build(),
+                server_info: Implementation::from_build_env(),
+                instructions: Some(
+                    "The system runs as an asynchronous job processing server that executes various functions in parallel. It supports general-purpose processing tasks like shell commands and HTTP/gRPC requests, while allowing users to create workflows through JSON-defined specifications. These workflows can compose multiple functions with defined input/output schemas, with all operations managed concurrently for efficient execution.".to_string(),
+                ),
+            }
     }
     #[allow(clippy::manual_async_fn)]
     fn call_tool(
@@ -517,148 +663,8 @@ impl ServerHandler for JobworkerpRouter {
                         McpError::internal_error(format!("Failed to find tools: {}", e), None)
                     })
             }?;
-            let tool_list = functions
-                .into_iter()
-                .flat_map(|tool| {
-                    if tool.worker_id.is_none()
-                        && tool.runner_type == RunnerType::ReusableWorkflow as i32
-                    {
-                        vec![Tool::new(
-                            tool.name,
-                            CREATION_TOOL_DESCRIPTION,
-                            tool.schema
-                                .and_then(|s| match s {
-                                    function_specs::Schema::SingleSchema(function) => {
-                                        function.settings.and_then(|f| {
-                                            serde_json::from_str(f.as_str())
-                                                .or_else(|e1| {
-                                                    tracing::warn!(
-                                                        "Failed to parse settings as json: {}",
-                                                        e1
-                                                    );
-                                                    serde_yaml::from_str(f.as_str()).inspect_err(
-                                                        |e2| {
-                                                            tracing::warn!(
-                                                        "Failed to parse settings as yaml: {}",
-                                                        e2
-                                                    );
-                                                        },
-                                                    )
-                                                })
-                                                .ok()
-                                        })
-                                    }
-                                    function_specs::Schema::McpTools(mcp) => {
-                                        let mes = format!(
-                                            "error: expect workflow but got mcp: {:?}",
-                                            mcp
-                                        );
-                                        tracing::error!(mes);
-                                        None
-                                    }
-                                })
-                                .unwrap_or(serde_json::json!({}))
-                                .as_object()
-                                .cloned()
-                                .unwrap_or_default(),
-                        )]
-                    } else if tool.runner_type == RunnerType::McpServer as i32 {
-                        let server_name = tool.name.as_str();
-                        match tool.schema {
-                            Some(function_specs::Schema::McpTools(McpToolList { list })) => list
-                                .into_iter()
-                                .map(|tool| {
-                                    Tool::new(
-                                        Self::combine_names(server_name, tool.name.as_str()),
-                                        tool.description.unwrap_or_default(),
-                                        serde_json::from_str(tool.input_schema.as_str())
-                                            .unwrap_or(serde_json::json!({}))
-                                            .as_object()
-                                            .cloned()
-                                            .unwrap_or_default(),
-                                    )
-                                })
-                                .collect(),
-                            Some(function_specs::Schema::SingleSchema(function)) => {
-                                tracing::error!(
-                                    "error: expect workflow but got function: {:?}",
-                                    function
-                                );
-                                vec![]
-                            }
-                            None => {
-                                tracing::error!("error: expect workflow but got none: {:?}", &tool);
-                                vec![]
-                            }
-                        }
-                    } else {
-                        let mut schema_combiner = SchemaCombiner::new();
-                        tool.schema
-                            .as_ref()
-                            .and_then(|s| match s {
-                                function_specs::Schema::SingleSchema(function) => {
-                                    function.settings.clone()
-                                }
-                                function_specs::Schema::McpTools(_) => {
-                                    tracing::error!(
-                                        "got mcp tool in not mcp tool runner type: {:#?}",
-                                        &tool
-                                    );
-                                    None
-                                }
-                            })
-                            .and_then(|s| {
-                                schema_combiner
-                                    .add_schema_from_string(
-                                        "settings",
-                                        s.as_str(),
-                                        Some("Tool init settings".to_string()),
-                                    )
-                                    .inspect_err(|e| {
-                                        tracing::error!("Failed to parse schema: {}", e)
-                                    })
-                                    .ok()
-                            });
-                        tool.schema
-                            .as_ref()
-                            .map(|s| match s {
-                                function_specs::Schema::SingleSchema(function) => {
-                                    function.arguments.clone()
-                                }
-                                function_specs::Schema::McpTools(_) => {
-                                    tracing::error!(
-                                        "got mcp tool in not mcp tool runner type: {:#?}",
-                                        &tool
-                                    );
-                                    "".to_string()
-                                }
-                            })
-                            .and_then(|args| {
-                                schema_combiner
-                                    .add_schema_from_string(
-                                        "arguments",
-                                        args.as_str(),
-                                        Some("Tool arguments".to_string()),
-                                    )
-                                    .inspect_err(|e| {
-                                        tracing::error!("Failed to parse schema: {}", e)
-                                    })
-                                    .ok()
-                            });
-                        match schema_combiner.generate_combined_schema() {
-                            Ok(schema) => vec![Tool::new(tool.name, tool.description, schema)],
-                            Err(e) => {
-                                tracing::error!("Failed to generate schema: {}", e);
-                                vec![]
-                            }
-                        }
-                    }
-                })
-                .collect::<Vec<_>>();
-
-            Ok(ListToolsResult {
-                tools: tool_list,
-                next_cursor: None,
+            Self::convert_functions_to_tools(functions).map_err(|e| {
+                McpError::internal_error(format!("Failed to convert tools: {}", e), None)
             })
         }
     }
