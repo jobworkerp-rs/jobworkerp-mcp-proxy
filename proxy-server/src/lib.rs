@@ -1,6 +1,5 @@
-use crate::jobworkerp::JobworkerpRouter;
+use crate::jobworkerp::{JobworkerpRouter, JobworkerpRouterConfig};
 use anyhow::Result;
-use jobworkerp::JobworkerpRouterConfig;
 use rmcp::{
     transport::{sse_server::SseServerConfig, stdio, SseServer},
     ServiceExt,
@@ -9,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 mod common;
 pub mod jobworkerp;
+pub mod tool_conversion;
 
 pub async fn boot_stdio_server(config: JobworkerpRouterConfig) -> Result<()> {
     let job_service = JobworkerpRouter::new(config).await?;
